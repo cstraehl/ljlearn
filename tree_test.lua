@@ -8,13 +8,14 @@ local ffi = require("ffi")
 local bitop = require("bit")
 
 require("luarocks.loader")
-local narray = require("ljarray.narray")
+local array = require("ljarray.array")
 local helpers = require("ljarray.helpers")
 local tree = require("tree")
+local forest = require("forest")
 
 
-local X_train = narray.create({100,2}, narray.float32)
-local y_train = narray.create({X_train.shape[0]},narray.int32)
+local X_train = array.create({100,2}, array.float32)
+local y_train = array.create({X_train.shape[0]},array.int32)
 
 X_train:bind(0,0,50):assign(1)
 X_train:bind(0,50,X_train.shape[0]):assign(100)
@@ -33,9 +34,9 @@ for i = 0, X_test.shape[0]-1 do
 end
 print("FINISHED TEST1")
 
-local X_train = narray.rand({100,10}, narray.float32)
+local X_train = array.rand({100,100}, array.float32)
 X_train:add(17)
-local y_train = narray.randint(0,2,{X_train.shape[0]},narray.int32):add(1)
+local y_train = array.randint(0,2,{X_train.shape[0]},array.int32):add(1)
 
 print("LEARNING TEST2")
 local t = tree.create({n_classes = 2, m_try = X_train.shape[1]})
@@ -55,14 +56,13 @@ print("TOTAL  CORRECCT COUNT", correct, correct / X_test.shape[0])
 
 
 print("BEGIN BENCHMARKING")
---math.randomseed(17)
+math.randomseed(os.time())
 
 
-local X_train = narray.rand({100000,30}, narray.float32)
-local y_train = narray.randint(0,2,{X_train.shape[0]}):add(1)
+local X_train = array.rand({1000000,10}, array.float32)
+local y_train = array.randint(0,2,{X_train.shape[0]}):add(1)
 
-
-local t = tree.create({n_classes = 2})
+local t = forest.create({n_trees = 1, n_classes = 2})
 
 helpers.benchmark(function() t:learn(X_train,y_train) end, 1, "training RF")
 

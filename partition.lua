@@ -1,116 +1,148 @@
+-- extend package.path with path of this .lua file:local filepath = debug.getinfo(1).source:match("@(.*)$") 
+local filepath = debug.getinfo(1).source:match("@(.*)$") 
+local dir = string.gsub(filepath, '/[^/]+$', '') .. "/"
+package.path = dir .. "/?.lua;" .. package.path
+
 local math = require("math") 
 local ffi = require("ffi")
 local bitop = require("bit")
+local jit = require("jit")
 
 require("luarocks.loader")
-local narray = require("ljarray.narray")
+local array = require("ljarray.array")
 local helpers = require("ljarray.helpers")
 local operator = helpers.operator
 
-module(..., package.seeall) -- export all local functions
+local Partition = {}
+Partition.__index = Partition
+
+ffi.cdef([[
+  typedef struct {
+    int start;
+    int stop;
+    int parent;
+    char left;
+    int left_child;
+    int right_child;
+  } partition_info;
+]])
+
+local Partition_info = ffi.typeof("partition_info")
+local Partition_info_VLA = ffi.typeof("partition_info[?]")
+
+Partition.create = function(X, y)
+  local pt = {}
+  setmetatable(pt, Partition)
+  pt.X = X
+  pt.partitions = array.create({2*X.shape[0]}, Partition_info_VLA)
+  -- create indices array that holds the samples 
+  -- of the partitions in dense ranges
+  pt.samples = array.arange(0,X.shape[0],array.int32)
+  pt.samples_copy = array.create({pt.samples.shape[0]}, array.int32)
+  -- preallocate a scratchpad for feature sorting
+  pt.values = array.create({X.shape[0]}, X.dtype)
+
+  -- initialize with 1 full partition
+  pt.n_partitions = 1
+  local root = pt.partitions.data[0]
+  root.start = 0
+  root.stop = X.shape[0]
+  root.left_child = -1
+  root.right_child = -1
+  root.parent = -1
 
 
-FeaturePartition = {}              
-FeaturePartition.__index = FeaturePartition
-
-FeaturePartition.create = function(X)
--- construct argsort indices of the feature matrix
--- and build initial partition 0
-  local fp = {}
-  setmetatable(fp, FeaturePartition)
-
-  local X = X:copy("f") -- copy to fortran order for unstridedness
-  -- construct argsort indices
-  local X_argsort = narray.create(X.shape, narray.int32, "f")
-  for f = 0, X.shape[1]-1 do                              
-    local line = X:bind(1,f)
-    local line_argsort = line:argsort()[1]
-    local X_argsort_line = X_argsort:bind(1,f)
-    X_argsort_line:assign(line_argsort)
-  end
-  -- store features and argsort indices
-  fp.X = X
-  fp.X_argsort = X_argsort
-  fp.samples = narray.create({X.shape[0]}, narray.int32) -- stores the assignment of samples to patititons
-  fp.start = {}  -- start offset of partition alogn 0 axis of X, X_argsort
-  fp.stop = {}   -- end of partition  along axis 0 of X, X_argsort
-  fp.size = {}  -- size of partition
-  -- construct inital full partition
-  fp.samples:assign(0)
-  fp.start[0] = 0
-  fp.stop[0] = X.shape[0]
-  fp.size[0] = fp.stop[0] - fp.start[0]
-  fp.n_partitions = 1
-  fp.children = {}
-
-  fp.x_argsort_temp = narray.create({X_argsort.shape[0]}, fp.X_argsort.dtype) -- small scratch pad, allocate once
-  return fp -- return the initial partition number
+  pt.root = 0
+  return pt
 end
 
-FeaturePartition.split = function(self, part, feature, split_pos )
--- split the given parition part into left and right part
--- returns:
---    left_number, right_number
+-- returns start and stop of the given partition
+-- in the samples array.
 --
-  assert(self.children[part] == nil, "FeaturePartition.split: already splitted")
+-- @param parition the partition number
+-- @return start,stop the range in the samples vector
+Partition.range = function(self, partition)
+  local start = self.partitions.data[partition].start
+  local stop = self.partitions.data[partition].stop
+  return start, stop
+end
 
-   -- register the new left partitions
-  local left_part = self.n_partitions
-  self.start[left_part] = self.start[part]
-  self.stop[left_part] = self.start[part] + split_pos + 1
-  self.size[left_part] = self.stop[left_part] - self.start[left_part]
-  self.n_partitions = self.n_partitions + 1
-
-  -- register the new right partitions
-  local right_part = self.n_partitions
-  self.start[right_part] = self.stop[left_part]
-  self.stop[right_part] = self.stop[part]
-  self.size[right_part] = self.stop[right_part] - self.start[right_part]
-  self.n_partitions = self.n_partitions + 1
-
-  -- register new children
-  self.children[part] = {left_part, right_part}
-
-  assert(self.size[left_part] + self.size[right_part] == self.size[part])
-
-  -- store the new sample to partition assignment
-  for i = self.start[left_part], self.stop[left_part] -1 do
-    self.samples:set(self.X_argsort:get(i, feature), left_part)
-  end
-  for i = self.start[right_part], self.stop[right_part] - 1 do
-    self.samples:set(self.X_argsort:get(i, feature), right_part)
-  end
-
-  -- move the features to their new positions
-  --
-  
-  for j = 0, self.X_argsort.shape[1]-1 do
-    -- first, copy argsort to scratch pad
-    for i = self.start[part], self.stop[part]-1 do
-      self.x_argsort_temp:set(i, self.X_argsort:get(i,j))
-    end                                                    
-    local counter_left = self.start[left_part]
-    local counter_right = self.start[right_part]
-    -- copy argsort indices to left and right partition
-    for i = self.start[part], self.stop[part]-1 do
-      local sample_number =  self.x_argsort_temp:get(i)
-      local sample = self.samples:get(sample_number) 
-
-      if sample == left_part then
-        self.X_argsort:set(counter_left,j, sample_number)
-        counter_left = counter_left + 1
-      elseif sample == right_part then
-        self.X_argsort:set(counter_right,j, sample_number)
-        counter_right = counter_right + 1
-      end
-    end
-    assert(counter_left == self.stop[left_part])
-    assert(counter_right == self.stop[right_part])
-  end
-  return left_part, right_part
+-- returns the size of a partition
+--
+-- @param parition the partition number
+-- @return size of the partition
+Partition.size = function(self, partition)
+  local p = self.partitions.data[partition] 
+  return p.stop - p.start
 end
 
 
+-- splits a partition at a position in two parts
+-- @rturns id_left, id_right
+Partition.split = function(self, partition, feature, position)
+  -- sort partition samples, and really update 
+  self:sort(partition,feature, true)
+          
+  local id_left = self.n_partitions
+  assert(self.n_partitions+2 < self.partitions.shape[0])
+  local id_right = self.n_partitions + 1
+
+  self.n_partitions = self.n_partitions + 2
+
+  local t_stop = self.partitions.data[partition].stop
+  local t_start = self.partitions.data[partition].start
+  assert(t_stop-t_start>position)
+
+  local p = self.partitions.data[partition]
+  p.left_child = id_left
+  p.right_child = id_right
+
+  local p = self.partitions.data[id_left]
+  p.start = t_start
+  p.stop = t_start + position + 1
+  p.parent = partition
+  p.left = 1
+  p.left_child = -1
+  p.right_child = -1
+
+  p = self.partitions.data[id_right]
+  p.start = t_start + position + 1
+  p.stop = t_stop
+  p.parent = partition
+  p.left = 0
+  p.left_child = -1
+  p.right_child = -1
+
+  return id_left, id_right
+end
+
+-- sorts a partition according to a feature
+Partition.sort = function(self, partition_nr, feature, in_place)
+  local partition =  self.partitions.data[partition_nr]
+
+  assert(partition.start >= 0, partition.start)
+  assert(partition.stop <= self.samples.shape[0], partition.stop)
+
+  -- copy feature values to scratchpad
+  for i = partition.start,  partition.stop-1  do
+    local sample = self.samples.data[i]
+    self.values.data[i] = self.X:get(sample, feature)
+  end
+  
+  local argsort
+  if in_place == true then
+    -- argsort samples via scratchpad values
+    argsort = self.values:argsort(0,nil,partition.start, partition.stop, self.samples)
+    assert(argsort[1] == self.samples)
+  else
+    for i = partition.start,  partition.stop-1  do
+      self.samples_copy.data[i] = self.samples.data[i]
+    end
+    argsort = self.values:argsort(0,nil,partition.start, partition.stop, self.samples_copy)
+  end
+
+  return argsort[1]
+end
 
 
-
+return Partition

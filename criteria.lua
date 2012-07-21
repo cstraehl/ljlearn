@@ -3,7 +3,7 @@ local ffi = require("ffi")
 local bitop = require("bit")
 
 require("luarocks.loader")
-local narray = require("ljarray.narray")
+local array = require("ljarray.array")
 local helpers = require("ljarray.helpers")
 local operator = helpers.operator
 
@@ -28,15 +28,18 @@ Gini.create = function(n_classes)
 end
 
 
-Gini.init = function(self, y)
+Gini.init = function(self, y, start, stop)
   self.y = y
-  self.n_samples = y.shape[0]
+  self.start = start or 0
+  self.stop = stop or y.shape[0]
+
+  self.n_samples = stop - start
   self.count_left = helpers.zeros(self.max_n_classes+1)
   self.count_right = helpers.zeros(self.max_n_classes+1)
   self.n_left = 0
   self.n_right = self.n_samples
   -- count classes, initially all samples are to the right
-  for i = 0, self.y.shape[0]-1 do
+  for i = self.start, self.stop-1 do
     local c = self.y.data[i]
     self.count_right[c] = self.count_right[c] + 1
   end
@@ -49,9 +52,9 @@ Gini.init = function(self, y)
 end
 
 Gini.move = function(self, delta)
-  self.n_left = self.n_left + delta
-  self.n_right = self.n_right - delta
-  local c = self.y.data[self.n_left]
+  local c = self.y.data[self.start + self.n_left]
+  self.n_left = self.n_left + 1
+  self.n_right = self.n_right - 1
   self.count_left[c] = self.count_left[c] +1
   self.count_right[c] = self.count_right[c] - 1
 end

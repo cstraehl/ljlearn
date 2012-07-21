@@ -8,12 +8,12 @@ local ffi = require("ffi")
 local bitop = require("bit")
 
 require("luarocks.loader")
-local narray = require("ljarray.narray")
+local array = require("ljarray.array")
 local helpers = require("ljarray.helpers")
 local operator = helpers.operator
 
 local criteria = require("criteria")
-local partition = require("partition")
+local Partition = require("partition")
 
 
 --module(..., package.seeall) -- export all local functions
@@ -31,9 +31,9 @@ Tree.create = function(options)
   tree.criterion_class = options.criterion or criteria.Gini
   tree.m_try = options.m_try -- default m_try is determined at learning time
 
-  tree.children = narray.create({2048,2})
-  tree.split_feature = narray.create({2048})
-  tree.split_threshold = narray.create({2048})
+  tree.children = array.create({2048,2})
+  tree.split_feature = array.create({2048})
+  tree.split_threshold = array.create({2048})
   tree.node_count = 0
 
   return tree
@@ -48,9 +48,20 @@ Tree.learn = function(self,X,y)
   self.m_try = self.m_try or math.ceil(math.sqrt(self.n_features)) -- default m_try is sqrt of feature number
 
   self.criterion = self.criterion_class.create(self.n_classes)
-  self._feature_indices = narray.arange(X.shape[1])
+  self._feature_indices = array.arange(X.shape[1])
   self:_build(X,y)
   -- print("finished learning")
+end
+
+
+Tree._predict_class_counts = function(self, X)
+  assert(X.ndim == 2)
+  assert(X.shape[1] == self.n_features)
+
+  local leaf_nodes = self:_predict_leaf_nodes(X)
+
+  local class_counts = self.leaf_class_count:take_slices(leaf_nodes, 0)
+  return class_counts
 end
 
 Tree.predict = function(self,X)
@@ -61,7 +72,7 @@ Tree.predict = function(self,X)
 
   local class_counts = self.leaf_class_count:take_slices(leaf_nodes, 0)
 
-  local result = narray.create({X.shape[0]},narray.int32)
+  local result = array.create({X.shape[0]},array.int32)
   result:assign(0) 
 
   for c = 0, self.n_classes do
@@ -77,7 +88,7 @@ end
 
 
 Tree._predict_leaf_nodes = function(self, X)
-  local leaf_node_indices = narray.create({X.shape[0]}, narray.int32) 
+  local leaf_node_indices = array.create({X.shape[0]}, array.int32) 
   for i=0,X.shape[0]-1 do
     local node = 0
     local f = self.split_feature:get(node)
@@ -92,8 +103,6 @@ Tree._predict_leaf_nodes = function(self, X)
       f = self.split_feature:get(node)
     end
     leaf_node_indices:set(i,node)
-    -- -- recursively traverse tree, starting from root node 0
-    -- leaf_node_indices:set(i, _predict_recurse(self,X,i,0))
   end
   return leaf_node_indices
 end
@@ -102,7 +111,7 @@ end
 Tree._setup_leaf_nodes = function(self, X, y)
   assert(X.shape[0] == y.shape[0])
 
-  local leaf_class_count = narray.create({self.node_count+1, self.n_classes+1}, narray.int32)
+  local leaf_class_count = array.create({self.node_count+1, self.n_classes+1}, array.int32)
   leaf_class_count:assign(0)
 
   local leaf_node_indices = self:_predict_leaf_nodes(X)
@@ -123,7 +132,7 @@ Tree._recursive_partition = function(tree,parent_node, is_left_child, partition_
    --print("recurse, size: ", tree.partition.size[partition_number])
   
   -- only split further if more then 1 sample
-  if tree.partition.size[partition_number] > 1 then
+  if tree.partition:size(partition_number) > 1 then
     -- find best split
     local best_split_feat, best_split_val, best_split_x, best_split_pos = tree:_find_best_split(partition_number)
 
@@ -139,10 +148,13 @@ Tree._recursive_partition = function(tree,parent_node, is_left_child, partition_
 
     else                                 
       -- did not find possible split, add leaf node
+      if best_split_val > 0 then
+        print("best_split_val", best_split_val, tree.partition:size(partition_number))
+      end
       tree:_add_leaf_node(parent_node, is_left_child)
     end
   else
-    -- clean node
+    -- 1-element node: clean node
     tree:_add_leaf_node(parent_node, is_left_child)
   end
 end
@@ -157,9 +169,10 @@ Tree._build = function(self, X, y)
   self.node_count = 0
 
   local crit = self.criterion_class.create(self.n_classes) -- construct criterion
-  self.partition = partition.FeaturePartition.create(X)
+  self.partition = Partition.create(X)
   self.X = X
   self.y = y
+  self.temp_y = array.create({self.y.shape[0]}, array.int32)
   self.crit = crit
   print("partitioning..")
   self:_recursive_partition(-1, nil, 0)
@@ -184,36 +197,21 @@ Tree._find_best_split = function(self, partition_number)
   local best_split_pos = 0
   local best_split_feat = -1
   local best_split_x = 0
-  local best_split_x_argsorted = nil
-  local best_split_y = nil
 
-  local partition_size = self.partition.size[partition_number]
+  local partition_size = self.partition:size(partition_number)
 
   local left_partition = nil
   local right_partition = nil
 
-  local x_argsort_i = narray.create({partition_size}, narray.int32)
-  local x = narray.create({partition_size}, self.X.dtype)
-  local y = narray.create({partition_size}, self.y.dtype)
-
-  
-  
   local i = 0
 
   -- try at least m_try features for splitting
   -- if no valid split point was found, try more features
   while (i < self.X.shape[1] and  best_split_feat == -1) or i < self.m_try do
     local f = self._feature_indices.data[i] -- get feature index to try
-    local start = self.partition.start[partition_number]
-    local stop = self.partition.stop[partition_number]
     
-    for j =0, x.shape[0]-1 do
-      x_argsort_i.data[j] = self.partition.X_argsort:get(start + j, f)
-      x.data[j] = self.partition.X:get(x_argsort_i.data[j],f)
-      y.data[j] = self.y:get(x_argsort_i.data[j])
-    end
     
-    local split_pos, split_val, split_x = self:_find_best_split_for_feat(x,x_argsort_i,y, self.crit)
+    local split_pos, split_val, split_x = self:_find_best_split_for_feat(partition_number, f, self.crit)
 
 
     if split_pos ~= -1 and split_val < best_split_val then
@@ -221,6 +219,10 @@ Tree._find_best_split = function(self, partition_number)
       best_split_val = split_val
       best_split_x = split_x
       best_split_feat = f
+    end
+
+    if split_val < best_split_val then
+      best_split_val = split_val
     end
     i = i + 1
   end
@@ -232,7 +234,7 @@ Tree._find_best_split = function(self, partition_number)
   return best_split_feat, best_split_val, best_split_x, best_split_pos 
 end
 
-Tree._find_best_split_for_feat = function(self, x, x_argsorted, y, crit)
+Tree._find_best_split_for_feat = function(self, partition, f, crit)
 -- finds the split position that minimizes self.criterion_class
   -- assert(x.ndim == 1)
   -- assert(x.ndim == y.ndim)
@@ -240,25 +242,38 @@ Tree._find_best_split_for_feat = function(self, x, x_argsorted, y, crit)
   -- assert(x.strides[0] == 1)
   -- assert(x_argsorted.strides[0] == 1)
   -- assert(y.shape[0]>1)
+  
+  local argsort = self.partition:sort(partition, f)
+  
+  local start, stop = self.partition:range(partition)
+  local x = self.partition.values
+  local y = self.temp_y
 
-  crit:init(y)
+  for i = start,stop-1 do
+    y.data[i] = self.y.data[argsort.data[i]]
+  end
+
+  crit:init(y,start,stop)
 
   local best_split_pos = -1  -- position of split, -1 means invalid
   local best_split_val = crit:eval() -- value of critertion that is minimized
   local best_split_x  -- feature value at best split
 
-  for i = 0, x.shape[0]-2 do
+
+  for i = start, stop-2 do
     -- splits can only happen between different feature values
     crit:move(1)
+    --print(partition, start, stop, i, x.data[i])
+    assert(x.data[i] <= x.data[i+1])
     if x.data[i+1] ~= x.data[i] then
       local crit_val = crit:eval()
       if crit_val < best_split_val then
-        best_split_pos = i 
+        best_split_pos = i - start
         best_split_val = crit_val
       end
     end
   end
-  best_split_x = (x.data[best_split_pos] + x.data[best_split_pos+1])/2
+  best_split_x = (x.data[start + best_split_pos] + x.data[start + best_split_pos+1])/2
   return best_split_pos, best_split_val, best_split_x
 end
 
