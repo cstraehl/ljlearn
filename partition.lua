@@ -30,10 +30,36 @@ ffi.cdef([[
 local Partition_info = ffi.typeof("partition_info")
 local Partition_info_VLA = ffi.typeof("partition_info[?]")
 
-Partition.create = function(X, y)
+Partition.create = function(X, y, mask)
   local pt = {}
   setmetatable(pt, Partition)
-  pt.X = X
+
+  -- count number of samples
+  local mask_count = 0
+  for i = 0, mask.shape[0] -1 do
+    if mask.data[i] == 1 then
+      mask_count = mask_count + 1
+    end
+  end
+
+  -- build dense fortran order feature matrix
+  pt.X = array.create({mask_count, X.shape[1]}, X.dtype)
+  pt.y = array.create({mask_count}, y.dtype)
+  local pos = 0
+  for i = 0, X.shape[0] do
+    if mask.data[i] == 1 then
+      pt.y.data[pos] = y.data[i]
+      for f = 0, X.shape[1]-1 do
+        pt.X:set(pos,f, X:get(i, f))
+      end
+      pos = pos + 1
+    end
+  end
+  X = pt.X
+
+
+
+
   pt.partitions = array.create({2*X.shape[0]}, Partition_info_VLA)
   -- create indices array that holds the samples 
   -- of the partitions in dense ranges

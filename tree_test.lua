@@ -23,7 +23,7 @@ X_train:bind(0,50,X_train.shape[0]):assign(100)
 y_train:bind(0,0,50):assign(1)
 y_train:bind(0,50,X_train.shape[0]):assign(2)
 
-local t = tree.create({n_classes = 2})
+local t = tree.create({f_subsample = 1.0, n_classes = 2})
 t:learn(X_train,y_train)
 
 local X_test = X_train
@@ -62,7 +62,7 @@ math.randomseed(os.time())
 local X_train = array.rand({1000000,10}, array.float32)
 local y_train = array.randint(0,2,{X_train.shape[0]}):add(1)
 
-local t = forest.create({n_trees = 1, n_classes = 2})
+local t = forest.create({n_trees = 3, n_classes = 2, m_try = 3})
 
 helpers.benchmark(function() t:learn(X_train,y_train) end, 1, "training RF")
 

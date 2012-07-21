@@ -30,6 +30,7 @@ Tree.create = function(options)
   tree.max_depth = options.max_depth or -1
   tree.criterion_class = options.criterion or criteria.Gini
   tree.m_try = options.m_try -- default m_try is determined at learning time
+  tree.f_subsample = options.f_subsample or 0.66
 
   tree.children = array.create({2048,2})
   tree.split_feature = array.create({2048})
@@ -45,7 +46,7 @@ Tree.learn = function(self,X,y)
   assert(X.shape[0] == y.shape[0])
   self.n_features = X.shape[1]
 
-  self.m_try = self.m_try or math.ceil(math.sqrt(self.n_features)) -- default m_try is sqrt of feature number
+  self.m_try = self.m_try or math.floor(math.sqrt(self.n_features)) -- default m_try is sqrt of feature number
 
   self.criterion = self.criterion_class.create(self.n_classes)
   self._feature_indices = array.arange(X.shape[1])
@@ -169,7 +170,17 @@ Tree._build = function(self, X, y)
   self.node_count = 0
 
   local crit = self.criterion_class.create(self.n_classes) -- construct criterion
-  self.partition = Partition.create(X)
+  -- creat sample mask
+  local subsample_mask = array.create({y.shape[0]}, array.int8)
+  for i = 0, (y.shape[0]-1)*self.f_subsample do
+    subsample_mask.data[i] = 1
+  end
+  for i = (y.shape[0]-1)*self.f_subsample+1, y.shape[0] - 1 do
+    subsample_mask.data[i] = 0
+  end
+  subsample_mask:permute()
+
+  self.partition = Partition.create(X,y,subsample_mask)
   self.X = X
   self.y = y
   self.temp_y = array.create({self.y.shape[0]}, array.int32)
@@ -250,7 +261,7 @@ Tree._find_best_split_for_feat = function(self, partition, f, crit)
   local y = self.temp_y
 
   for i = start,stop-1 do
-    y.data[i] = self.y.data[argsort.data[i]]
+    y.data[i] = self.partition.y.data[argsort.data[i]]
   end
 
   crit:init(y,start,stop)
